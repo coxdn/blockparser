@@ -13,6 +13,16 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+    #ifndef O_BINARY
+        #define O_BINARY _O_BINARY
+    #endif
+#endif
+
+#ifndef O_BINARY
+    #define O_BINARY 0
+#endif
+
 #if !defined(S_ISDIR)
     #define S_ISDIR(mode) (S_IFDIR==((mode) & S_IFMT))
 #endif
@@ -1008,7 +1018,8 @@ static void findBlockFiles() {
         sprintf(buf, fmt, blkDatId++);
 
         auto fileName = blockChainDir + std::string(buf) ;
-        auto fd = open(fileName.c_str(), O_RDONLY);
+        auto openFlags = O_RDONLY | O_BINARY;
+        auto fd = open(fileName.c_str(), openFlags);
         if(fd<0) {
             if(1<blkDatId) {
                 break;
