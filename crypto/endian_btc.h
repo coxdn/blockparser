@@ -1,12 +1,14 @@
-
 // Cross-platform endian helpers for Windows (Microsoft Visual C++) and POSIX (Portable Operating System Interface).
 // Header is self-contained and provides htobe*/htole* and be*/le*toh macros used by crypto/common_btc.h.
 #pragma once
 #include <stdint.h>
 
-#if defined(_WIN32)
+#if defined(_MSC_VER) || defined(_WIN32) || defined(WIN32)
   // Windows is little-endian; provide byte-swap intrinsics.
   #include <stdlib.h>  // _byteswap_ushort, _byteswap_ulong, _byteswap_uint64
+  #if defined(_MSC_VER)
+    #include <intrin.h>
+  #endif
 
   #ifndef htobe16
   #define htobe16(x) _byteswap_ushort((uint16_t)(x))
