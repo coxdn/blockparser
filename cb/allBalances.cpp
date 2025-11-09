@@ -14,6 +14,8 @@
 #include <string.h>
 #include <signal.h>
 #include <algorithm>
+#include <time.h>
+#include <stdio.h>
 
 struct Addr;
 struct AllBalances;
@@ -41,6 +43,7 @@ struct Addr {
     uint32_t lastIn;
     uint32_t lastOut;
     OutputVec *outputVec;
+    uint8_t bucketIndex;
 };
 
 template<> uint8_t *PagedAllocator<Addr>::pool = 0;
@@ -67,6 +70,18 @@ struct AllBalances:public Callback {
     int64_t showAddr;
     int64_t cutoffBlock;
     optparse::OptionParser parser;
+
+    bool useTimeSnapshots;
+    bool snapshotsInitialized;
+    bool headerWritten;
+    bool skipCurrentBlock;
+    int64_t toTime;
+    int64_t snapshotInterval;
+    int64_t anchorOffset;
+    int64_t nextSnapshotTime;
+
+    static const size_t kBucketCount = 8;
+    uint64_t bucketSums[kBucketCount];
 
     AddrMap addrMap;
     uint32_t blockTime;
@@ -117,6 +132,13 @@ struct AllBalances:public Callback {
             .action("store_true")
             .set_default(false)
             .help("produce CSV-formatted output instead column-formatted")
+        ;
+        parser
+            .add_option("--toTime")
+            .action("store")
+            .type("string")
+            .set_default("")
+            .help("dump daily cohort totals up to the given UTC timestamp (format YYYY-MM-DD HH:MM:SS, e.g. --toTime \"2018-01-01 00:00:00\")")
         ;
 
         if(theObject) {
@@ -175,7 +197,19 @@ struct AllBalances:public Callback {
         addrMap.resize(15 * 1000 * 1000);
         allAddrs.reserve(15 * 1000 * 1000);
 
-	optparse::Values &values = parser.parse_args(argc, argv);
+        useTimeSnapshots = false;
+        snapshotsInitialized = false;
+        headerWritten = false;
+        skipCurrentBlock = false;
+        snapshotInterval = 24 * 60 * 60;
+        anchorOffset = 0;
+        nextSnapshotTime = 0;
+        toTime = -1;
+        for(size_t i=0; i<kBucketCount; ++i) {
+            bucketSums[i] = 0;
+        }
+
+        optparse::Values &values = parser.parse_args(argc, argv);
 
 
         cutoffBlock = values.get("atBlock").asInt64();
@@ -185,6 +219,22 @@ struct AllBalances:public Callback {
         csv = values.get("csv");
         interrupted = false;
         isDone = false;
+        skipCurrentBlock = false;
+
+        const char *timeString = values.get("toTime");
+        if(timeString && timeString[0]) {
+            if(0<=cutoffBlock) {
+                errFatal("--toTime cannot be combined with --atBlock");
+            }
+            if(!parseTimeString(timeString, toTime)) {
+                errFatal("invalid --toTime value, expected YYYY-MM-DD HH:MM:SS");
+            }
+            useTimeSnapshots = true;
+            anchorOffset = toTime % snapshotInterval;
+            if(anchorOffset<0) {
+                anchorOffset += snapshotInterval;
+            }
+        }
 
         auto args = parser.args();
         for(size_t i=1; i<args.size(); ++i) {
@@ -222,6 +272,146 @@ struct AllBalances:public Callback {
         return 0;
     }
 
+    static time_t timegmCompat(struct tm *utc)
+    {
+    #if defined(_WIN32)
+        return _mkgmtime(utc);
+    #else
+        return timegm(utc);
+    #endif
+    }
+
+    static bool parseTimeString(const char *value, int64_t &out)
+    {
+        int year = 0;
+        int month = 0;
+        int day = 0;
+        int hour = 0;
+        int minute = 0;
+        int second = 0;
+        if(6!=sscanf(value, "%d-%d-%d %d:%d:%d", &year, &month, &day, &hour, &minute, &second)) {
+            return false;
+        }
+        if(year<1970 || month<1 || 12<month || day<1 || 31<day || hour<0 || 23<hour || minute<0 || 59<minute || second<0 || 59<second) {
+            return false;
+        }
+
+        struct tm utc;
+        memset(&utc, 0, sizeof(utc));
+        utc.tm_year = year - 1900;
+        utc.tm_mon = month - 1;
+        utc.tm_mday = day;
+        utc.tm_hour = hour;
+        utc.tm_min = minute;
+        utc.tm_sec = second;
+        utc.tm_isdst = 0;
+
+        time_t converted = timegmCompat(&utc);
+        if(converted<0) {
+            return false;
+        }
+        out = (int64_t)converted;
+        return true;
+    }
+
+    static void formatIsoTime(char *buf, size_t bufSize, int64_t when)
+    {
+        time_t ts = (time_t)when;
+        struct tm gmTime;
+        gmtime_r(&ts, &gmTime);
+        snprintf(
+            buf,
+            bufSize,
+            "%04d-%02d-%02d %02d:%02d:%02d",
+            gmTime.tm_year + 1900,
+            gmTime.tm_mon + 1,
+            gmTime.tm_mday,
+            gmTime.tm_hour,
+            gmTime.tm_min,
+            gmTime.tm_sec
+        );
+    }
+
+    static uint8_t bucketIndexFor(uint64_t sum)
+    {
+        static const uint64_t edges[kBucketCount + 1] = {
+            0ULL,
+            10000000ULL,
+            100000000ULL,
+            1000000000ULL,
+            10000000000ULL,
+            100000000000ULL,
+            1000000000000ULL,
+            10000000000000ULL,
+            100000000000000ULL
+        };
+        for(size_t i=0; i<(kBucketCount-1); ++i) {
+            if(sum < edges[i+1]) {
+                return (uint8_t)i;
+            }
+        }
+        return (uint8_t)(kBucketCount-1);
+    }
+
+    int64_t alignDown(int64_t value) const
+    {
+        int64_t relative = value - anchorOffset;
+        int64_t remainder = relative % snapshotInterval;
+        if(remainder<0) {
+            remainder += snapshotInterval;
+        }
+        return value - remainder;
+    }
+
+    void initSnapshots(int64_t firstBlockTime)
+    {
+        if(!useTimeSnapshots || snapshotsInitialized) {
+            return;
+        }
+        snapshotsInitialized = true;
+        nextSnapshotTime = alignDown(firstBlockTime);
+        if(nextSnapshotTime < 0) {
+            nextSnapshotTime = 0;
+        }
+    }
+
+    void printTimeSeriesHeader()
+    {
+        if(headerWritten) {
+            return;
+        }
+        headerWritten = true;
+        printf(
+            "timestamp\t0-0.1\t0.1-1\t1-10\t10-100\t100-1,000\t1,000-10,000\t10,000-100,000\t100,000-1,000,000\n"
+        );
+    }
+
+    void emitSnapshot(int64_t snapshotTime)
+    {
+        printTimeSeriesHeader();
+        char timeBuf[32];
+        formatIsoTime(timeBuf, sizeof(timeBuf), snapshotTime);
+        printf("%s", timeBuf);
+        for(size_t i=0; i<kBucketCount; ++i) {
+            printf("\t%.8f", satoshisToNormaForm(bucketSums[i]));
+        }
+        printf("\n");
+    }
+
+    void emitSnapshotsUpTo(int64_t availableTime)
+    {
+        if(!useTimeSnapshots || !snapshotsInitialized) {
+            return;
+        }
+        while(nextSnapshotTime <= toTime && nextSnapshotTime <= availableTime) {
+            emitSnapshot(nextSnapshotTime);
+            nextSnapshotTime += snapshotInterval;
+        }
+        if(useTimeSnapshots && nextSnapshotTime > toTime) {
+            isDone = true;
+        }
+    }
+
     void move(
         const uint8_t *script,
         uint64_t      scriptSize,
@@ -232,6 +422,10 @@ struct AllBalances:public Callback {
         uint64_t      inputIndex = -1
     )
     {
+        if(useTimeSnapshots && skipCurrentBlock) {
+            return;
+        }
+
         uint8_t addrType[3];
         uint160_t pubKeyHash;
         auto scriptType = solveOutputScript(
@@ -265,6 +459,7 @@ struct AllBalances:public Callback {
             addr->nbOut = 0;
             addr->nbIn = 0;
             addr->sum = 0;
+            addr->bucketIndex = bucketIndexFor(addr->sum);
 
             if(detailed) {
                 addr->outputVec = new OutputVec;
@@ -272,6 +467,12 @@ struct AllBalances:public Callback {
 
             addrMap[addr->hash.v] = addr;
             allAddrs.push_back(addr);
+        }
+
+        uint64_t oldSum = addr->sum;
+        uint8_t oldBucket = addr->bucketIndex;
+        if(useTimeSnapshots) {
+            bucketSums[oldBucket] -= oldSum;
         }
 
         if(0<value) {
@@ -282,6 +483,12 @@ struct AllBalances:public Callback {
             ++(addr->nbOut);
         }
         addr->sum += value;
+
+        if(useTimeSnapshots) {
+            uint8_t newBucket = bucketIndexFor(addr->sum);
+            bucketSums[newBucket] += addr->sum;
+            addr->bucketIndex = newBucket;
+        }
 
         if(detailed) {
             struct Output output;
@@ -350,6 +557,17 @@ struct AllBalances:public Callback {
     }
 
     virtual void wrapup() {
+
+        if(useTimeSnapshots) {
+            if(snapshotsInitialized) {
+                int64_t limit = blockTime;
+                if(0<=toTime && toTime<limit) {
+                    limit = toTime;
+                }
+                emitSnapshotsUpTo(limit);
+            }
+            return;
+        }
 
         CompareAddr compare;
         auto e = allAddrs.end();
@@ -492,6 +710,7 @@ struct AllBalances:public Callback {
         uint64_t chainSize
     ) {
         curBlock = b;
+        skipCurrentBlock = false;
 
         const uint8_t *p = b->chunk->getData();
         const uint8_t *sz = -4 + p;
@@ -526,10 +745,28 @@ struct AllBalances:public Callback {
         SKIP(uint256_t, prevBlkHash, p);
         SKIP(uint256_t, blkMerkleRoot, p);
         LOAD(uint32_t, bTime, p);
+
+        if(useTimeSnapshots) {
+            initSnapshots(bTime);
+            int64_t available = (int64_t)bTime - 1;
+            if(available < 0) {
+                available = -1;
+            }
+            emitSnapshotsUpTo(available);
+            if(isDone) {
+                skipCurrentBlock = true;
+            }
+        }
+
         blockTime = bTime;
 
         if(0<=cutoffBlock && cutoffBlock<=curBlock->height) {
             isDone = true;
+        }
+
+        if(useTimeSnapshots && 0<=toTime && toTime < (int64_t)bTime) {
+            isDone = true;
+            skipCurrentBlock = true;
         }
     }
 
