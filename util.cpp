@@ -9,7 +9,15 @@
 
 #include <util.h>
 #include <timer.h>
+// Windows/MSVC vs POSIX alloca
+#if defined(_MSC_VER)
+#include <malloc.h>
+#ifndef alloca
+#define alloca _alloca
+#endif
+#else
 #include <alloca.h>
+#endif
 #include <common.h>
 #include <errlog.h>
 #include <rmd160.h>
@@ -603,7 +611,6 @@ bool addrToHash160(
     static BN_CTX *ctx = 0;
     if(unlikely(!ctx)) {
         ctx = BN_CTX_new();
-        BN_CTX_init(ctx);
         sum = BN_new();
     }
 
@@ -726,7 +733,6 @@ void hash160ToAddr(
 
     if(!ctx) {
         ctx = BN_CTX_new();
-        BN_CTX_init(ctx);
 
         b58 = BN_new();
         num = BN_new();
