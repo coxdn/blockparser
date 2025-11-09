@@ -75,11 +75,17 @@ struct Help : public Callback {
             printf("\n");
             printf("General Usage: parser <command> <options> <command arguments>\n");
             printf("\n");
+            printf("    Global options:\n");
+            printf("        -B, --blocks-dir DIR\n");
+            printf("            override the default blockchain directory and read blocks from DIR\n");
+            printf("\n");
             printf("    Where <command> can be any of:\n");
             Callback::find("", true);
             printf("\n");
             printf("    NOTE: use \"parser help <command>\" or \"parser <command> --help\" to get detailed\n");
             printf("          help for a specific command.\n");
+            printf("\n");
+            printf("    NOTE: global options may be specified before or after the command name.\n");
             printf("\n");
             printf("    NOTE: <command> may have multiple aliases and can also be abbreviated. For\n");
             printf("          example, \"parser tx\", \"parser tr\", and \"parser transactions\" are equivalent.\n");

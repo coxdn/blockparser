@@ -36,6 +36,8 @@ static Callback *gCallback;
 
 static const BlockFile *gCurBlockFile;
 static std::vector<BlockFile> blockFiles;
+static std::string gBlockDirOverride;
+static std::vector<char*> gFilteredArgv;
 
 static TXOMap gTXOMap;
 static BlockMap gBlockMap;
@@ -922,7 +924,56 @@ static std::string getNormalizedDirName(
     return r;
 }
 
+static void parseGlobalArgs(
+    int   &argc,
+    char **&argv
+) {
+
+    gFilteredArgv.clear();
+    gFilteredArgv.reserve(argc + 1);
+
+    if(0<argc) {
+        gFilteredArgv.push_back(argv[0]);
+    }
+
+    for(int i=1; i<argc; ++i) {
+
+        auto current = std::string(argv[i]);
+
+        if("--"==current) {
+            for(int j=i; j<argc; ++j) {
+                gFilteredArgv.push_back(argv[j]);
+            }
+            break;
+        }
+
+        if("-B"==current || "--blocks-dir"==current) {
+
+            if(i+1>=argc) {
+                errFatal("option %s requires an argument", current.c_str());
+            }
+
+            gBlockDirOverride = argv[++i];
+            continue;
+        }
+
+        if(0==current.compare(0, 13, "--blocks-dir=")) {
+            gBlockDirOverride = current.substr(13);
+            continue;
+        }
+
+        gFilteredArgv.push_back(argv[i]);
+    }
+
+    gFilteredArgv.push_back(0);
+    argc = (int)gFilteredArgv.size() - 1;
+    argv = gFilteredArgv.data();
+}
+
 static std::string getBlockchainDir() {
+    if(!gBlockDirOverride.empty()) {
+        return getNormalizedDirName(gBlockDirOverride);
+    }
     auto dir = getenv("BLOCKCHAIN_DIR");
     if(0==dir) {
         dir = getenv("HOME");
@@ -1014,6 +1065,8 @@ int main(
     int   argc,
     char *argv[]
 ) {
+
+    parseGlobalArgs(argc, argv);
 
     auto start = Timer::usecs();
     fprintf(stderr, "\n");
