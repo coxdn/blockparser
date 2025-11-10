@@ -10,6 +10,8 @@
 #include <fcntl.h>
 #include <malloc.h>
 #include <stdlib.h>
+#include <time.h>
+#include <limits>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -58,6 +60,8 @@ static Block *gNullBlock;
 static int64_t gMaxHeight;
 static uint64_t gChainSize;
 static uint256_t gNullHash;
+static int64_t gTimeLimit = -1;
+static bool gUseTimeLimit = false;
 
 static double getMem() {
 
@@ -764,22 +768,70 @@ static void buildBlockHeaders() {
 
     info("pass 1 -- walk all blocks and build headers ...");
 
+    if(gUseTimeLimit) {
+        char isoBuf[32];
+        time_t limit = (time_t)gTimeLimit;
+        struct tm gmTime;
+        gmtime_r(&limit, &gmTime);
+        snprintf(
+            isoBuf,
+            sizeof(isoBuf),
+            "%04d-%02d-%02d %02d:%02d:%02d",
+            gmTime.tm_year + 1900,
+            gmTime.tm_mon + 1,
+            gmTime.tm_mday,
+            gmTime.tm_hour,
+            gmTime.tm_min,
+            gmTime.tm_sec
+        );
+        info("limiting block scan to timestamps <= %s (UTC)", isoBuf);
+    }
+
     size_t nbBlocks = 0;
-    size_t baseOffset = 0;
+    uint64_t baseOffset = 0;
     size_t earlyMissCnt = 0;
     uint8_t buf[8+gHeaderSize];
     const auto sz = sizeof(buf);
     const auto startTime = Timer::usecs();
     const auto oneMeg = 1024 * 1024;
+    bool limitReached = false;
+    uint64_t effectiveSize = 0;
 
     for(const auto &blockFile : blockFiles) {
 
+        if(limitReached) {
+            break;
+        }
+
         startBlockFile(0);
+
+        uint64_t fileBytesRead = 0;
+        bool fileLimitReached = false;
 
         while(1) {
 
             auto nbRead = read(blockFile.fd, buf, sz);
             if(nbRead<(signed)sz) {
+                break;
+            }
+
+            const uint8_t *timePtr = buf + 8 + 4 + 32 + 32;
+            LOAD(uint32_t, rawTime, timePtr);
+            uint32_t blockTime = rawTime;
+
+            if(gUseTimeLimit && ((int64_t)blockTime > gTimeLimit)) {
+                auto cur = lseek(blockFile.fd, 0, SEEK_CUR);
+                if(cur<0) {
+                    cur = 0;
+                }
+                fileBytesRead = (uint64_t)cur;
+                if(fileBytesRead >= sz) {
+                    fileBytesRead -= sz;
+                } else {
+                    fileBytesRead = 0;
+                }
+                limitReached = true;
+                fileLimitReached = true;
                 break;
             }
 
@@ -801,44 +853,65 @@ static void buildBlockHeaders() {
             }
 
             auto where = lseek(blockFile.fd, (blockSize + 8) - sz, SEEK_CUR);
-            auto blockOffset = where - blockSize;
             if(where<0) {
                 break;
             }
+            auto blockOffset = where - blockSize;
+            fileBytesRead = (uint64_t)where;
 
             auto block = Block::alloc();
-            block->init(hash, &blockFile, blockSize, prevBlock, blockOffset);
+            block->init(hash, &blockFile, blockSize, prevBlock, blockOffset, blockTime);
             gBlockMap[hash] = block;
             endBlock((uint8_t*)0);
             ++nbBlocks;
+
+            effectiveSize += blockSize;
         }
-        baseOffset += blockFile.size;
+
+        if(fileLimitReached) {
+            baseOffset += fileBytesRead;
+        } else {
+            baseOffset += blockFile.size;
+        }
 
         auto now = Timer::usecs();
         auto elapsed = now - startTime;
-        auto bytesPerSec = baseOffset / (elapsed*1e-6);
-        auto bytesLeft = gChainSize - baseOffset;
-        auto secsLeft = bytesLeft / bytesPerSec;
+        auto elapsedSec = elapsed*1e-6;
+        double bytesPerSec = (elapsedSec>0.0) ? baseOffset/elapsedSec : 0.0;
+        uint64_t targetSize = limitReached ? baseOffset : gChainSize;
+        if(targetSize < baseOffset) {
+            targetSize = baseOffset;
+        }
+        double bytesLeft = (targetSize > baseOffset) ? (targetSize - baseOffset) : 0.0;
+        double secsLeft = (bytesPerSec>0.0) ? (bytesLeft / bytesPerSec) : 0.0;
+        double progressDen = (targetSize>0) ? (double)targetSize : 1.0;
+
         fprintf(
             stderr,
             " %.2f%% (%.2f/%.2f Gigs) -- %6d blocks -- %.2f Megs/sec -- ETA %.0f secs -- ELAPSED %.0f secs            \r",
-            (100.0*baseOffset)/gChainSize,
+            (100.0*baseOffset)/progressDen,
             baseOffset/(1000.0*oneMeg),
-            gChainSize/(1000.0*oneMeg),
+            targetSize/(1000.0*oneMeg),
             (int)nbBlocks,
             bytesPerSec*1e-6,
             secsLeft,
-            elapsed*1e-6
+            elapsedSec
         );
         fflush(stderr);
 
         endBlockFile(0);
+
+        if(limitReached) {
+            break;
+        }
     }
 
     if(0==nbBlocks) {
         warning("found no blocks - giving up                                                       ");
         exit(1);
     }
+
+    gChainSize = effectiveSize;
 
     char msg[128];
     msg[0] = 0;
@@ -848,7 +921,8 @@ static void buildBlockHeaders() {
 
     auto elapsed = 1e-6*(Timer::usecs() - startTime);
     info(
-        "pass 1 -- took %.0f secs, %6d blocks, %.2f Gigs, %.2f Megs/secs %s, mem=%.3f Gigs                                            ",
+        "pass 1 -- took %.0f secs, %6d blocks, %.2f Gigs, %.2f Megs/secs %s, mem=%.3f Gigs
+      ",
         elapsed,
         (int)nbBlocks,
         (gChainSize * 1e-9),
@@ -860,7 +934,7 @@ static void buildBlockHeaders() {
 
 static void buildNullBlock() {
     gBlockMap[gNullHash.v] = gNullBlock = Block::alloc();
-    gNullBlock->init(gNullHash.v, 0, 0, 0, 0);
+    gNullBlock->init(gNullHash.v, 0, 0, 0, 0, 0);
     gNullBlock->height = 0;
 }
 
@@ -969,6 +1043,39 @@ static void parseGlobalArgs(
 
         if(0==current.compare(0, 13, "--blocks-dir=")) {
             gBlockDirOverride = current.substr(13);
+            continue;
+        }
+
+        if("--stop-at-time"==current) {
+
+            if(i+1>=argc) {
+                errFatal("option %s requires an argument", current.c_str());
+            }
+
+            const char *value = argv[++i];
+            int64_t parsed = 0;
+            if(!parseTimeString(value, parsed)) {
+                errFatal("invalid --stop-at-time value, expected YYYY-MM-DD HH:MM:SS");
+            }
+            if(parsed<0 || parsed>static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                errFatal("--stop-at-time is outside supported range (1970-01-01 00:00:00 .. 2106-02-07 06:28:15)");
+            }
+            gTimeLimit = parsed;
+            gUseTimeLimit = true;
+            continue;
+        }
+
+        if(0==current.compare(0, 15, "--stop-at-time=")) {
+            auto value = current.substr(15);
+            int64_t parsed = 0;
+            if(!parseTimeString(value.c_str(), parsed)) {
+                errFatal("invalid --stop-at-time value, expected YYYY-MM-DD HH:MM:SS");
+            }
+            if(parsed<0 || parsed>static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                errFatal("--stop-at-time is outside supported range (1970-01-01 00:00:00 .. 2106-02-07 06:28:15)");
+            }
+            gTimeLimit = parsed;
+            gUseTimeLimit = true;
             continue;
         }
 
