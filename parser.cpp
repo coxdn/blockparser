@@ -649,8 +649,12 @@ static void findBlockParent(
         toHex(pHash, 4 + buf);
 
         warning(
-            "in block %s failed to locate parent block %s",
+            "in block %s (height=%" PRId64 ", time=%" PRIu32 ", file=%s, offset=%" PRIu64 ") failed to locate parent block %s",
             bHash,
+            static_cast<int64_t>(b->height),
+            static_cast<uint32_t>(b->time),
+            b->chunk->getBlockFile()->name.c_str(),
+            static_cast<uint64_t>(b->chunk->getOffset()),
             pHash
         );
         return;
