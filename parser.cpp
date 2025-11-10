@@ -925,8 +925,7 @@ static void buildBlockHeaders() {
 
     auto elapsed = 1e-6*(Timer::usecs() - startTime);
     info(
-        "pass 1 -- took %.0f secs, %6d blocks, %.2f Gigs, %.2f Megs/secs %s, mem=%.3f Gigs
-      ",
+        "pass 1 -- took %.0f secs, %6d blocks, %.2f Gigs, %.2f Megs/secs %s, mem=%.3f Gigs",
         elapsed,
         (int)nbBlocks,
         (gChainSize * 1e-9),
