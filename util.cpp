@@ -2,6 +2,7 @@
 #include <string>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <algorithm>
 #include <openssl/bn.h>
 #include <openssl/ecdsa.h>
@@ -38,6 +39,48 @@ template<> uint8_t *PagedAllocator<uint160_t>::poolEnd = 0;
 
 template<> uint8_t *PagedAllocator<Chunk>::pool = 0;
 template<> uint8_t *PagedAllocator<Chunk>::poolEnd = 0;
+
+time_t timegmCompat(struct tm *utc)
+{
+#if defined(_WIN32)
+    return _mkgmtime(utc);
+#else
+    return timegm(utc);
+#endif
+}
+
+bool parseTimeString(const char *value, int64_t &out)
+{
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if(6!=sscanf(value, "%d-%d-%d %d:%d:%d", &year, &month, &day, &hour, &minute, &second)) {
+        return false;
+    }
+    if(year<1970 || month<1 || 12<month || day<1 || 31<day || hour<0 || 23<hour || minute<0 || 59<minute || second<0 || 59<second) {
+        return false;
+    }
+
+    struct tm utc;
+    memset(&utc, 0, sizeof(utc));
+    utc.tm_year = year - 1900;
+    utc.tm_mon = month - 1;
+    utc.tm_mday = day;
+    utc.tm_hour = hour;
+    utc.tm_min = minute;
+    utc.tm_sec = second;
+    utc.tm_isdst = 0;
+
+    time_t converted = timegmCompat(&utc);
+    if(converted<0) {
+        return false;
+    }
+    out = (int64_t)converted;
+    return true;
+}
 
 void toHex(
           uint8_t *dst,     // 2*size +1

@@ -3,6 +3,7 @@
 
     #include <string>
     #include <vector>
+    #include <time.h>
 
     #include <common.h>
     #include <errlog.h>
@@ -153,13 +154,15 @@
         int64_t       height;
         Block         *prev;
         Block         *next;
+        uint32_t      time;
 
         void init(
             const uint8_t   *_hash,
             const BlockFile *_blockFile,
             size_t          _size,
             Block           *_prev,
-            uint64_t        _offset      
+            uint64_t        _offset,
+            uint32_t        _time
         ) {
             chunk = Chunk::alloc();
             chunk->init(_blockFile, _size, _offset);
@@ -168,6 +171,7 @@
             height = -1;
             prev = _prev;
             next = 0;
+            time = _time;
         }
 
         static Block *alloc() {
@@ -489,5 +493,14 @@
     }
 
     const char *getInterestingAddr();
+
+    time_t timegmCompat(
+        struct tm *utc
+    );
+
+    bool parseTimeString(
+        const char *value,
+        int64_t &out
+    );
 
 #endif // __UTIL_H__

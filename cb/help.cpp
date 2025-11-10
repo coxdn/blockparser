@@ -78,6 +78,8 @@ struct Help : public Callback {
             printf("    Global options:\n");
             printf("        -B, --blocks-dir DIR\n");
             printf("            override the default blockchain directory and read blocks from DIR\n");
+            printf("        --stop-at-time YYYY-MM-DD HH:MM:SS\n");
+            printf("            limit parsing to blocks at or before the given UTC timestamp\n");
             printf("\n");
             printf("    Where <command> can be any of:\n");
             Callback::find("", true);
