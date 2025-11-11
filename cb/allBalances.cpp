@@ -671,8 +671,7 @@ struct AllBalances:public Callback {
         skipCurrentBlock = false;
 
         const uint8_t *p = b->chunk->getData();
-        const uint8_t *sz = -4 + p;
-        LOAD(uint32_t, size, sz);
+        uint64_t size = b->chunk->getSize();
         offset += size;
 
         double now = Timer::usecs();
